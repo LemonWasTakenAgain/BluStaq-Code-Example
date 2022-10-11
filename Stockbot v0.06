@@ -1,0 +1,391 @@
+import time
+from datetime import datetime, timedelta
+from datetime import date
+import datetime
+from Keys import Keys
+import alpaca_trade_api as tradeapi
+from alpaca_trade_api.rest import TimeFrame
+import discord
+
+base_url = Keys.base_url
+key_id = Keys.key_id
+secret_key = Keys.secret_key
+watchlist = Keys.watchlist
+TOKEN = Keys.TOKEN
+client = discord.Client(activity=discord.Game(name='The numbers!'))
+
+
+class Liam_Strategy:
+
+    def __init__(self):
+        self.api = tradeapi.REST(
+            key_id=key_id,
+            base_url=base_url,
+            secret_key=secret_key, )
+        # Watchlist to determine our stocks we wish to trade.
+        self.watchlist_id = watchlist
+
+        # Dates used to determine the datarange for our stocks.
+        self.todays_date = date.today()
+        self.yesterday = self.todays_date - \
+                         timedelta(days=1)
+        # Days variable we can change based off research data.
+        self.days = 6
+        self.data_range = self.todays_date - \
+                          timedelta(days=self.days)
+        self.todays_date = str(self.todays_date)
+        self.yesterday = str(self.yesterday)
+        self.data_range = str(self.data_range)
+
+        # Pulling information from alpaca about our current account and positions ect.
+        self.data_url = Keys.data_url
+        self.url = Keys.url
+        self.orders = self.api.list_orders()
+        self.account = self.api.get_account()
+        self.buying_power = float(self.account.buying_power)
+        self.positions = self.api.list_positions()
+        self.portfolio = float(self.account.portfolio_value)
+
+        #   Initializing counters.
+        self.position_number = [0]
+        self.index = -1
+        self.active_symbols = []
+        self.stock_count = 0
+        self.data_counter = 0
+        self.days_counter = []
+        self.buyamt = 0
+        self.sellamt = 0
+        self.daychange_buy = 0
+        self.days_change_pos_math = 0
+        self.days_change = 0
+        self.change_math = 0
+        self.change_pos_math = 0
+
+        self.trading = True
+
+        #   Func calling.
+
+        self.stockscounter()
+        # self.time()
+        self.position_variables()
+        self.stock_index()
+        self.watchlist_check()
+
+    #   Time to trade default is 5pm MTN time every day.
+    def time(self):
+        while datetime.datetime.now().hour < 17:
+            print(f'Its not time to trade try again in until 5 MTN time.')
+            exit()
+        if datetime.datetime.now().hour >= 17:
+            return
+
+    #   A counter to help get an idea of the amount of positions the bot is going to run through.
+
+    def stockscounter(self):
+        count = 0
+        tradingwaitrange = 0
+        for i in self.positions:
+            count += 1
+            self.position_number.append(count)
+            tradingwaitrange = len(self.position_number)
+
+        self.trade_time = tradingwaitrange * 15
+        print(
+            f'Stocky is going to analyze {tradingwaitrange} stocks this will take approximately {self.trade_time} seconds!')
+
+    #   Defining all position information we need.
+
+    def position_variables(self):
+        self.position_symbols = [x.symbol for x in self.positions]
+        self.position_qtys = [x.qty for x in self.positions]
+        self.position_prices = [x.current_price for x in self.positions]
+        self.position_changes = [x.change_today for x in self.positions]
+        self.position_avg_entry_price = [x.avg_entry_price for x in self.positions]
+        self.activities = self.api.get_activities(activity_types='FILL', date=self.todays_date)
+
+    #   Grabbing all of the information we need from the positions and identifying only 1 stock.
+
+    def position_(self):
+
+        self.symbol = (self.position_symbols[self.index])
+        self.change = float(self.position_changes[self.index])
+        self.qty = (self.position_qtys[self.index])
+        self.price = float(self.position_prices[self.index])
+        self.avg_entry = float(self.position_avg_entry_price[self.index])
+        self.position = {"Symbol": self.symbol,
+                         "Change": self.change,
+                         "Qty": self.qty,
+                         "Price": self.price,
+                         "Avg_Entry": self.avg_entry}
+        self.sell = False
+        self.buy = False
+        time.sleep(5)
+
+    #   Checks if we traded the symbol today yet or not.
+
+    def active_check(self):
+        pass
+        for i in self.activities:
+            active_symbol_temp = i.symbol
+            transaction_time = i.transaction_time
+            transaction_time = str(transaction_time)[0:10]
+            if transaction_time == self.yesterday:
+                return
+            else:
+                self.active_symbols.append(active_symbol_temp)
+        for i in set(self.active_symbols):
+            if i == self.symbol:
+                print("We already traded", self.symbol)
+                self.sell = False
+                self.buy = False
+
+    #   Initialized discord for future use in posting messages each time it trades.
+
+    #   Orders func is used later to be called in the sell and buy functions.
+
+    def orders_(self, symbol, amt, side):
+        if self.buy or self.sell == True:
+            if amt <= 0.0000001:
+                amt = 0.0000001
+            self.order = self.api.submit_order(
+                symbol=symbol,
+                qty=amt,
+                type='market',
+                side=side,
+                time_in_force='day', )
+        if self.sell == True:
+            print(f'Stocky sold {symbol}:{amt} at {self.price}')
+            amt = float(amt)
+            self.price = float(self.price)
+            self.avg_entry = float(self.avg_entry)
+            profit = (amt * self.price) - (amt * self.avg_entry)
+            print(f'Avg entry: {self.avg_entry} Profit:{profit} Portfolio value:{self.portfolio}')
+        if self.buy == True:
+            print(f'Stocky purchased {symbol}:{amt} at {self.price}')
+            cost = float(amt) * float(self.price)
+            print(f'Avg entry: {self.avg_entry} Cost:{cost} Portfolio value:{self.portfolio}')
+            time.sleep(5)
+        else:
+            pass
+
+    #   Grabs the bars for our stocks from alpaca in the defined dayrange and grabs the past days change.
+
+    def bars_(self):
+        if self.sell and self.buy == False:
+            return
+        #   The use of alpaca to collect our data is our main issue and assuring all that data matches up.
+        #   That being said the data is collected here, and I implemented a wait, so it will correctly line up.
+        self.bars = (self.api.get_bars(self.symbol, TimeFrame.Day, self.data_range, self.yesterday, limit=self.days,
+                                       adjustment='raw').df)
+        days_selected = []
+        self.days_change = []
+        self.days_change_temp = []
+        self.days_change_pos = []
+        time.sleep(5)
+        self.open_bars = self.bars.open
+        for i in self.open_bars:
+            days_selected.append(i)
+        days_research_range = len(days_selected)
+        #   Where the bot determines how many days the stock price has gone up or down.
+        for i in days_selected:
+            if self.data_counter == days_research_range - 1:
+                self.data_counter = 0
+            self.data_counter += 1
+            if days_selected[self.data_counter] > i:
+                self.days_change_temp.append(i)
+            elif days_selected[self.data_counter] < i:
+                self.days_change_pos.append(i)
+
+
+    #   Checks that our watchlist matches our positions and assures all symbols match up if not it asks to order the missing ones.
+
+    def watchlist_check(self):
+        temp_watchcheck = []
+        self.watchlist_assets = self.api.get_watchlist(watchlist).assets
+        for i in self.watchlist_assets:
+            self.watchlist_asset = (i['symbol'])
+            temp_watchcheck.append(self.watchlist_asset)
+
+        #  Making our lists and checking them twice to see if the stocks are in the watchlist or not.
+
+        position_check = sorted(set(self.position_symbols))
+        stock_watchlist_check = sorted(set(temp_watchcheck))
+        master_set = stock_watchlist_check + position_check
+        master_set = set(master_set)
+
+        # The checking part of the stocks to assure they are all the same testing them against the master set.
+
+        correct = stock_watchlist_check == position_check
+        wrong_postition_list = master_set.difference(position_check)
+        wrong_watchlist = master_set.difference(stock_watchlist_check)
+
+        # Simple but useful expression to ask if we'd like to add the missing stocks.
+
+        if correct == True:
+            print("All symbols in watchlist and positions are correct.")
+        if correct == False:
+            if len(wrong_watchlist) > 0:
+                print("Watchlist is missing, or is about to order ", wrong_watchlist)
+            else:
+                print("Position list is missing, or has an error for ", wrong_postition_list)
+
+        if len(wrong_watchlist) > 0:
+            order_watchlist = input(print("Would you like to order these missing watchlist symbols Y/N? "))
+            if order_watchlist == "Y":
+                for i in wrong_watchlist:
+                    self.orders_(symbol=i, amt=0.00001, side="buy")
+        if len(wrong_postition_list) > 0:
+            order_watchlist = input(print("Would you like to order these missing position symbols Y/N? "))
+            if order_watchlist == "Y":
+                for i in wrong_postition_list:
+                    self.api.add_to_watchlist(self.watchlist_id, i)
+
+
+    #   The math for our days probably where I would identify where my strategy differs to make it unique.
+
+    def days_math(self):
+        sellchange = 0
+        buychange = 0
+        # The days math that we retrieved from bars being casted correctly and cleaned up so 0 past days won't affect it.
+        print('days func')
+        time.sleep(.5)
+        if self.sell == True:
+            sellchange = self.change * 100
+            self.change_pos_math = abs(sellchange) * len(self.days_change_pos)
+            print(f'new changepos math = {self.change_pos_math}' )
+            self.buy = False
+        elif self.buy == True:
+            buychange = self.change * 100
+            self.change_math = abs(self.change) * len(self.days_change_temp)
+            print(f'New change math = {self.change_math}')
+            self.sell = False
+        if self.change_pos_math or self.change_math >= 1:
+            self.change_math = self.change_math * .75
+            self.change_pos_math = self.change_pos_math * .75
+            print(f'{self.symbol} had an issue with selling or buying more stock at a multiplier higher than we own and has been reduced.')
+        
+
+    #   The math for our buy function with a combination of the above days math to get our order amt.
+
+    def buymath(self):
+        #   The buy math determining how the strategy functions.
+        limit = self.buying_power / self.price
+        self.buyamt =  self.change_math / 100
+        limit = str(limit)
+        limit = float(limit)
+        self.buyamt = limit * float(self.buyamt)
+        self.buyamt = limit * float(self.buyamt)
+        print(self.buyamt)
+    #   Same as buy it gets the sell math for the strategy and defines the sell amount.
+
+    def sellmath(self):
+        #   The sell function its much shorter than the buy but with the same principles and day multiplier it determines how much we sell for.
+        sell_limit = self.qty
+        self.sellamt = float(self.change_pos_math) * 0.01
+        sell_limit = str(sell_limit)
+        print("sell limit = "+ sell_limit)
+        sell_limit = float(sell_limit)
+        self.sellamt = sell_limit * float(self.sellamt)
+        self.sellamt = sell_limit * float(self.sellamt)
+        print(self.sellamt)
+
+    #   This is where we determine if it should buy or sell then do the according math so we don't waste recourses/time.
+
+    def sellbuy(self):
+        print(f'symbol = {self.symbol} change = {self.change} entry = {self.avg_entry} price = {self.price}')
+
+        if self.change > 0 and len(self.days_change_temp) < len(self.days_change_pos):
+
+            self.sell = True
+            self.buy = False
+            self.days_math()
+            self.active_check()
+            self.sellmath()
+            self.stock_index()
+            self.sellfunc()
+            self.sell = False
+        if self.change < 0 and len(self.days_change_temp) > len(self.days_change_pos):
+            self.buy = True
+            self.sell = False
+            self.days_math()
+            self.active_check()
+            self.buymath()
+            self.stock_index()
+            self.buyfunc()
+            self.buy = False
+        elif self.change == 0.0:
+            self.stock_index()
+
+    #   Sends the final buy order after some safety nets of course to stop it from going out of its bounds.
+
+    def buyfunc(self):
+        while self.buy == True:
+            self.buyamt = float(self.buyamt)
+            print(self.buyamt)
+            if self.buyamt != 0.0:
+                #   This finally checks one more time if all else failed and the bot couldn't update its info and tries buying more than it can afford this will stop it before the code ends.
+
+                if self.buyamt * self.price > self.buying_power:
+                    self.buyamt = str(self.buyamt)
+                    print("ERROR ERROR ERROR")
+                    print(f' Bot tried to purchase {self.buyamt} orders of {self.symbol}, but could not afford it.')
+                    self.buy = False
+                    self.stock_index()
+
+                #   This portion stops the bot from purchasing more than .2 of our whole portfolio value.
+
+                elif (self.buyamt * self.price) > (self.portfolio * .2):
+                    print("ERROR ERROR ERROR")
+                    print(
+                        f'Bot tried to purchase {self.buyamt} orders of {self.symbol}, but this order is greater than 20% of our portfolio value.')
+                    self.buy = False
+                    self.stock_index()
+                else:
+                    #   This is where the bot sends a call to the order_ func and finally orders the stock with all of its math.
+
+                    self.buyamt = str(abs(self.buyamt))
+                    self.orders_(symbol=self.symbol, amt=self.buyamt, side='buy')
+                    self.buy = False
+
+
+
+    #   Sends final sell order with the safety nets just as the buy.
+    #   my main issues in the past have resided in the sell func so prayers with this one.
+
+    def sellfunc(self):
+
+        while self.sell == True:
+            #   Assuring bot doesnt attempt to sell more stock than we own.
+            self.sellamt = float(self.sellamt)
+            self.qty = float(self.qty)
+            if self.sellamt != 0.0:
+                if self.sellamt >= self.qty:
+                    self.qty = str(self.qty)
+                    print("ERROR ERROR ERROR")
+                    print(f'Bot tried to sell {self.sellamt} orders of {self.symbol}, but we only own {self.qty}.')
+                    self.stock_index()
+                else:
+
+                    # The actual sell order calling to order_ func with the amt after its been determined by all the math.
+
+                    self.sellamt = str(self.sellamt)
+                    self.orders_(symbol=self.symbol, amt=self.sellamt, side='sell')
+                    self.sell = False
+            else:
+                break
+
+    #   Finally, our index counter counts which stock we are analyzing and updating the index accordingly.
+
+    def stock_index(self):
+        for i in self.position_number:
+            self.index += 1
+            self.sell = False
+            self.buy = False
+            self.position_()
+            self.bars_()
+            self.sellbuy()
+
+
+
+Liam_Strategy()
+
