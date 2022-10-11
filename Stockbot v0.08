@@ -1,0 +1,616 @@
+import datetime
+import alpaca_trade_api as tradeapi
+from alpaca_trade_api.rest import TimeFrame
+import time
+import discord
+from Keys import Keys
+import pprint
+import math
+from datetime import date, timedelta
+
+base_url = Keys.base_url
+key_id = Keys.key_id
+secret_key = Keys.secret_key
+TOKEN = Keys.TOKEN
+client = discord.Client()
+
+#   Class containing the order/alpaca segment of Stocky.
+
+class Liam_Strategy:
+
+    def __init__(self):
+        # Connecting to Alpaca
+        self.api = tradeapi.REST(
+            key_id=key_id,
+            base_url=base_url,
+            secret_key=secret_key, )
+        # Watchlist to determine our stocks we wish to trade.
+        self.watchlist_id = Keys.watchlist
+
+        # Dates used to determine the datarange for our stocks.
+        self.todays_date = date.today()
+        self.yesterday = self.todays_date - \
+                         timedelta(days=1)
+        # Days variable we can change based off research data.
+        self.days = 6
+        self.data_range = self.todays_date - \
+                          timedelta(days=self.days)
+        self.todays_date = str(self.todays_date)
+        self.yesterday = str(self.yesterday)
+        self.data_range = str(self.data_range)
+
+        # Pulling information from alpaca about our current account and positions ect.
+        self.data_url = Keys.data_url
+        self.url = Keys.url
+        self.orders = self.api.list_orders()
+        self.account = self.api.get_account()
+        self.buying_power = float(self.account.buying_power)
+        self.positions = self.api.list_positions()
+        self.portfolio = float(self.account.portfolio_value)
+        self.cash = self.api.get_account().cash
+
+        #   Initializing counters.
+        self.cashonhand = self.portfolio * .2
+        self.cashonhand = float(self.cashonhand) - float(self.cash)
+        self.position_number = [0]
+        self.index = -1
+        self.active_symbols = []
+        self.stock_count = 0
+        self.trade_time = 15
+        self.trade_time = float(self.trade_time)
+        self.days_counter = []
+        self.buyamt = 0
+        self.sellamt = 0
+        self.daychange_buy = 0
+        self.days_change_pos_math = 0
+        self.days_change = 0
+        self.change_math = 0
+        self.change_pos_math = 0
+        self.sell = False
+        self.buy = True
+
+        # Config can be commented out if you do not wish to see/edit config.
+        #self.config()
+        self.position_variables()
+        self.stock_index()
+
+    #   Easy way to adjust time/stocks and the time Stocky spends on each stock.
+
+    def config(self):
+        count = 0
+        for i in self.positions:
+            count += 1
+            self.position_number.append(count)
+
+        print(f'|Stockys Current Config|', end=""
+                                               f'Days: {self.days} '
+                                               f'Stocks: {len(self.position_number)} '
+                                               f'Time per stock: {self.trade_time} ')
+        change_config = input(f'Do you wish to change the config? Y|N ').upper
+        while change_config == "Y":
+            if change_config == "N":
+                break
+            change_choice = input(f'Which config would you like to edit '
+                                  f'1:Days 2:Stock 3:Time Per Stock: '
+                                  f'N: Escape')
+            time.sleep(2)
+            if change_choice == "1":
+                self.days = input(f'Input the new day parameter: ')
+            elif change_choice == "2":
+                print('Please liquidate any positions with the alpaca App currently.')
+            elif change_choice == "3":
+                self.trade_time = input(f'Input the new trade time limit: ')
+            elif change_choice == "N":
+                print("Exiting Config")
+                break
+            else:
+                print("Choice was not chosen in time skipping.")
+                print(f'|Stockys New Config|', end=""
+                                                   f'Days: {self.days} '
+                                                   f'Stocks: {len(self.position_number)} '
+                                                   f'Time per stock: {self.trade_time} ')
+            keep_changing = input("Would you like to make any more changes? Y|N ")
+
+            if keep_changing == "Y":
+                self.config()
+            else:
+                print("Exiting Config")
+                break
+
+    # Getting all of the current positions data that we need and putting it into lists.
+
+    def position_variables(self):
+        self.position_symbols = [x.symbol for x in self.positions]
+        self.position_qtys = [x.qty for x in self.positions]
+        self.position_prices = [x.current_price for x in self.positions]
+        self.position_changes = [x.change_today for x in self.positions]
+        self.position_avg_entry_price = [x.avg_entry_price for x in self.positions]
+        self.activities = self.api.get_activities(activity_types='FILL', date=self.todays_date)
+
+    # Pulling the individual stock from our huge list we defined above and setting its variables.
+
+    def position_(self):
+        self.symbol = (self.position_symbols[self.index])
+        self.change = float(self.position_changes[self.index])
+        self.qty = (self.position_qtys[self.index])
+        self.price = float(self.position_prices[self.index])
+        self.avg_entry = float(self.position_avg_entry_price[self.index])
+        self.position = {"Symbol": self.symbol,
+                         "Change": self.change,
+                         "Qty": self.qty,
+                         "Price": self.price,
+                         "Avg_Entry": self.avg_entry}
+        self.sell = False
+        self.buy = False
+
+    # Tests whether or not we purchased the stock today.
+
+    def active_check(self):
+        active_sleep = float(self.trade_time) / 3
+        time.sleep(active_sleep)
+        for i in self.activities:
+            active_symbol_temp = i.symbol
+            transaction_time = i.transaction_time
+            transaction_time = str(transaction_time)[0:10]
+            if transaction_time == self.yesterday:
+                return
+            else:
+                self.active_symbols.append(active_symbol_temp)
+        for i in set(self.active_symbols):
+            if i == self.symbol:
+                print("We already traded", self.symbol)
+                self.sell = False
+                self.buy = False
+                self.stock_index()
+
+    # Defining the orders_ func for later calling.
+
+    def orders_(self, symbol, amt, side):
+        orders_sleep = self.trade_time / 3
+        if self.buy or self.sell == True:
+            if float(amt) <= 0.0000001:
+                amt = 0.0000001
+
+            self.order = self.api.submit_order(
+                symbol=symbol,
+                qty=amt,
+                type='market',
+                side=side,
+                time_in_force='day', )
+        if self.sell == True:
+            print(f'Stocky sold {symbol}:{amt} at {self.price}')
+            amt = float(amt)
+            self.price = float(self.price)
+            self.avg_entry = float(self.avg_entry)
+            profit = (amt * self.price) - (amt * self.avg_entry)
+            print(f'Avg entry: {self.avg_entry} Profit:{profit} Buying Power:{self.buying_power}')
+        if self.buy == True:
+            print(f'Stocky purchased {symbol}:{amt} at {self.price}')
+            cost = float(amt) * float(self.price)
+            print(f'Avg entry: {self.avg_entry} Cost:{cost} Buying Power:{self.buying_power}')
+            time.sleep(orders_sleep)
+
+    # Retrieves our data for the specified days in config.
+
+    def bars_(self):
+        bars_sleep = float(self.trade_time) / 3
+        if self.sell and self.buy == False:
+            return
+        #   The use of alpaca to collect our data is our main issue and assuring all that data matches up.
+        #   That being said the data is collected here, and I implemented a wait, so it will correctly line up.
+        self.bars = (self.api.get_bars(self.symbol, TimeFrame.Day, self.data_range, self.yesterday, limit=self.days,
+                                       adjustment='raw').df)
+        days_selected = []
+        data_counter = 0
+        self.days_change_temp = []
+        self.days_change_pos = []
+        time.sleep(bars_sleep)
+        self.open_bars = self.bars.open
+        for i in self.open_bars:
+            days_selected.append(i)
+        days_research_range = len(days_selected)
+        #   Where the bot determines how many days the stock price has gone up or down.
+        for i in days_selected:
+            if data_counter == days_research_range - 1:
+                data_counter = 0
+            data_counter += 1
+            if days_selected[data_counter] > i:
+                self.days_change_temp.append(i)
+            elif days_selected[data_counter] < i:
+                self.days_change_pos.append(i)
+
+    # Checks if Stocky is missing any watchlist symbols or positions symbols and orders/adds to watchlist accordingly.
+
+    def watchlist_check(self):
+        temp_watchcheck = []
+        self.watchlist_assets = self.api.get_watchlist(self.watchlist_id).assets
+        for i in self.watchlist_assets:
+            self.watchlist_asset = (i['symbol'])
+            temp_watchcheck.append(self.watchlist_asset)
+        #  Making our lists and checking them twice to see if the stocks are in the watchlist or not.
+
+        position_check = sorted(set(self.position_symbols))
+        stock_watchlist_check = sorted(set(temp_watchcheck))
+        master_set = stock_watchlist_check + position_check
+        master_set = set(master_set)
+
+        # The checking part of the stocks to assure they are all the same testing them against the master set.
+
+        correct = stock_watchlist_check == position_check
+        wrong_postition_list = master_set.difference(position_check)
+        wrong_watchlist = master_set.difference(stock_watchlist_check)
+
+        # Simple but useful expression to ask if we'd like to add the missing stocks.
+
+        if correct == True:
+            print("All symbols in watchlist and positions are correct.")
+        if correct == False:
+            if len(wrong_watchlist) > 0:
+                print("Watchlist is missing, or is about to order ", wrong_watchlist)
+            else:
+                print("Position list is missing, or has an error for ", wrong_postition_list)
+
+        if len(wrong_watchlist) > 0:
+            order_watchlist = input(print("Would you like to order these missing watchlist symbols Y/N? "))
+            if order_watchlist == "Y":
+                for i in wrong_watchlist:
+                    self.orders_(symbol=i, amt=0.00001, side="buy")
+        if len(wrong_postition_list) > 0:
+            order_watchlist = input(print("Would you like to order these missing position symbols Y/N? "))
+            if order_watchlist == "Y":
+                for i in wrong_postition_list:
+                    self.api.add_to_watchlist(self.watchlist_id, i)
+
+    # The main math for our stock once it is determined sell/buy true based off the recent days preformance.
+
+    def days_math(self):
+
+        sellchange = self.change
+        buychange = self.change
+        sellchange = abs(sellchange)
+        buychange = abs(buychange)
+        # The days math that we retrieved from bars being casted correctly and cleaned up so 0 past days won't affect it.
+        time.sleep(.5)
+        if self.sell == True:
+            self.days_change_pos = len(self.days_change_pos) + 2
+            self.change_pos_math = sellchange * self.days_change_pos
+            self.change_pos_math = round(self.change_pos_math, 4)
+
+            time.sleep(.1)
+        elif self.buy == True:
+            self.days_change_temp = len(self.days_change_temp)
+            self.change_math = buychange * self.days_change_temp
+            self.change_math = round(self.change_math, 4)
+
+            time.sleep(.1)
+        if self.change_pos_math >= 1.0 and self.sell == True:
+            self.change_pos_math = .05
+            print(f'price = {self.price} symbol = {self.symbol} avg = {self.avg_entry}')
+            self.price = float(self.price)
+            self.avg_entry = float(self.avg_entry)
+            print(
+                f'{self.symbol} had an issue with selling or buying more stock at a multiplier higher than we own and has been reduced.')
+        elif self.change_math >= 1.0 and self.buy == True:
+            self.change_math = .05
+            print(f'price = {self.price} symbol = {self.symbol} avg = {self.avg_entry}')
+            print(
+                f'{self.symbol} had an issue with selling or buying more stock at a multiplier higher than we own and has been reduced.')
+            self.price = float(self.price)
+            self.avg_entry = float(self.avg_entry)
+
+    # The buy math section to determine how much it should buy with the 20% cash on hand rule.
+
+    def buymath(self):
+        #   The buy math determining how the strategy functions.
+        limit = self.buying_power - self.cashonhand
+        limit = limit / self.price
+        cashonhand = limit * .2
+        limit = limit - cashonhand
+        limit = float(limit)
+        self.buyamt = limit * float(self.change_math)
+        self.buyamt = float(round(self.buyamt,4))
+
+    # The sell math of Stocky to determine how much to sell we sell on a higher multiplier.
+
+    def sellmath(self):
+        #   The sell function its much shorter than the buy but with the same principles and day multiplier it determines how much we sell for.
+        entry_multiplier = float(self.price) - float(self.avg_entry)
+        entry_multiplier = float(entry_multiplier) / float(self.price)
+        self.sellamt = float(entry_multiplier) + float(self.sellamt)
+        sell_limit = self.qty
+        sell_limit = str(sell_limit)
+        sell_limit = float(sell_limit)
+        self.sellamt = sell_limit * float(self.change_pos_math)
+        self.sellamt = float(round(self.sellamt,4))
+
+    # Determines the order of events for a stock determined based whether it should be buy/sell.
+
+    def sellbuy(self):
+
+        try:
+            if self.change > 0 and len(self.days_change_temp) < len(self.days_change_pos):
+                self.sell = True
+                self.buy = False
+                self.days_math()
+                self.active_check()
+                self.sellmath()
+                self.sellfunc()
+                self.stock_index()
+                self.sell = False
+            if len(self.days_change_temp) > len(self.days_change_pos):
+                self.buy = True
+                self.sell = False
+
+                self.days_math()
+                self.active_check()
+                self.buymath()
+                self.buyfunc()
+                self.stock_index()
+                self.buy = False
+            elif self.change == 0.0:
+                self.stock_index()
+            else:
+                self.stock_index()
+        except(IndexError):
+            self.watchlist_check()
+            print("Stocky has finished trading thankyou!")
+            exit()
+
+    # Finally places the buy order after checking against all the safety nets.
+
+    def buyfunc(self):
+        while self.buy == True:
+            if self.buyamt != 0.0:
+                #   This finally checks one more time if all else failed and the bot couldn't update its info and tries buying more than it can afford this will stop it before the code ends.
+
+                if (float(self.buyamt) * float(self.price)) > self.buying_power:
+                    self.buyamt = str(self.buyamt)
+                    print("ERROR ERROR ERROR")
+                    print(f' Bot tried to purchase {self.buyamt} orders of {self.symbol}, but could not afford it.')
+                    self.buy = False
+                    self.stock_index()
+
+                #   This portion stops the bot from purchasing more than .2 of our whole portfolio value.
+
+                elif (float(self.buyamt * float(self.price)) > (self.portfolio * .2):
+                    print("ERROR ERROR ERROR")
+                    print(
+                        f'Bot tried to purchase {self.buyamt} orders of {self.symbol}, but this order is greater than 20% of our portfolio value.')
+                    self.buy = False
+                    self.stock_index()
+                elif float(self.cashonhand) >= float(self.buying_power):
+                    print("ERROR ERROR ERROR")
+                    print(
+                        f'To avoid any wild market volatility the bot is required to keep 20% portfolio value in cash on hand sorry bot cannot buy.')
+                    self.buy = False
+                    self.stock_index()
+                else:
+                    #   This is where the bot sends a call to the order_ func and finally orders the stock with all of its math.
+
+                    self.buyamt = str(abs(self.buyamt))
+                    self.orders_(symbol=self.symbol, amt=self.buyamt, side='buy')
+                    self.buy = False
+
+    # Finally places the sell order after checking its safety nets not as much to catch here.
+    def sellfunc(self):
+
+        while self.sell == True:
+            #   Assuring bot doesnt attempt to sell more stock than we own.
+            self.sellamt = float(self.sellamt)
+            self.qty = float(self.qty)
+            if self.sellamt != 0.0:
+                if self.sellamt >= self.qty:
+                    self.qty = str(self.qty)
+                    print("ERROR ERROR ERROR")
+                    print(f'Bot tried to sell {self.sellamt} orders of {self.symbol}, but we only own {self.qty}.')
+                    self.stock_index()
+                elif float(self.avg_entry) > float(self.price):
+                    print("ERROR ERROR ERROR")
+                    print(
+                        f'Bot tried to sell {self.sellamt} orders of {self.symbol}, but this order is less than the avg entry of our stock value.')
+                    self.sell = False
+                    self.stock_index()
+
+                else:
+
+                    # The actual sell order calling to order_ func with the amt after its been determined by all the math.
+
+                    self.sellamt = str(self.sellamt)
+                    self.orders_(symbol=self.symbol, amt=self.sellamt, side='sell')
+                    self.sell = False
+            else:
+                break
+
+    # The order all of the functions are called and a return back for when we need to move onto the next stock.
+
+    def stock_index(self):
+        for i in self.position_number:
+            self.index += 1
+            print(f'Checking {self.index} out of {self.position_number}.')
+            self.sell = False
+            self.buy = False
+            self.position_()
+            self.bars_()
+            self.sellbuy()
+            if i == self.position_number[-1]:
+                print("Last stock exiting code goodbye!")
+                exit()
+
+#   Class containing the discord front end side of Stocky.
+
+class discordbot():
+
+    def __init__(self):
+
+        self.api = tradeapi.REST(
+            key_id=Keys.key_id,
+            base_url=Keys.base_url,
+            secret_key=Keys.secret_key, )
+        self.watchlist_bot = self.api.get_watchlist(Keys.watchlist).assets
+        self.activities = self.api.get_activities()
+        self.equity = self.api.get_portfolio_history().equity
+        self.port_hist_pl = self.api.get_portfolio_history().profit_loss
+
+
+        self.command_list = {}
+        self.daily_pl = []
+        self.port_hist_pl_clean = []
+        self.equity_clean = []
+        self.plcount = 0
+        self.temprange1 = 0
+        self.temprange2 = 5
+        self.temprange3 = 0
+        self.temprange4 = 5
+        self.trade_time = 15
+        self.trade_time = float(self.trade_time)
+        self.watchlisting = False
+
+
+        self.trading()
+        self.list_cleanup()
+        self.commandslist()
+        self.on_message()
+        self.token()
+        self.time()
+
+
+    def trading(self):
+
+        @client.event
+        async def on_ready():
+            channel = client.get_channel(985706083526017075)
+            activity = discord.Game(name="%help Shipping Lemons", sep="\n")
+            print('We have logged in as {0.user}.'.format(client))
+            #await channel.send(f"Stocky is trading.")
+
+
+    def list_cleanup(self):
+        count = 0
+
+        self.symbols = []
+        self.names = []
+        watchlist = {}
+
+        for i in self.watchlist_bot:
+            self.symbols.append(i['symbol'])
+            self.names.append(i['name'])
+        for i in self.port_hist_pl:
+            if i == 0:
+                pass
+            elif i != 0:
+                i = round(i)
+                self.port_hist_pl_clean.append(i)
+        for i in self.equity:
+            if i == 0:
+                pass
+            elif i == 10000:
+                i = 0
+            elif i > 0:
+                i = round(i)
+                self.equity_clean.append(i)
+
+
+
+        self.watchlist_bot = dict(zip(self.symbols, self.names))
+        self.watchlist_range = len(self.watchlist_bot) / 4
+        self.watchlist_range = math.ceil(self.watchlist_range)
+        self.port_hist_pl_clean = self.port_hist_pl_clean[-6:-1]
+        self.equity_clean = self.equity_clean[-6:-1]
+
+
+    def commandslist(self):
+        commands = ["%stocky alive",
+                    "%watchlist",
+                    "%equity",
+                    "%profit loss",
+                    "%help"]
+        commands_desc = ["- Tests whether Stocky is currently asleep or active.",
+                         "- Displays the currently active stocks in Stockys watchlist and their names.",
+                         "- Displays account equity.",
+                         "- Stockys earnings in the specified timeframe.",
+                         "- Displays list of commands for stocky."]
+        self.command_list = dict(zip(commands, commands_desc))
+        self.command_list = pprint.pformat(self.command_list)
+
+    def on_message(self):
+
+        @client.event
+        async def on_message(message):
+            username = str(message.author).split('#')[0]
+            user_message = str(message.content)
+            channel = str(message.channel.name)
+            print(f'{username}: {user_message} ({channel})')
+
+            if message.author == client.user:
+                return
+
+            if message.channel.name == 'stocky':
+                if user_message[0] == '%':
+                    if user_message.lower == '%stocky alive':
+                        await message.channel.send(f'Stocky at attention {username}!')
+                        return
+                    elif user_message.lower == '%watchlist':
+                        count = 0
+
+                        self.watchlisting = True
+                        await message.channel.send(f'|Your watchlist|')
+                        while self.watchlisting == True:
+                            if count != self.watchlist_range:
+                                temp_symbols = self.symbols[self.temprange1:self.temprange2]
+                                temp_names = self.names[self.temprange1:self.temprange2]
+                                watchlist = dict(zip(temp_symbols, temp_names))
+
+                                watchlist = pprint.pformat(watchlist)
+                                await message.channel.send(watchlist)
+                                time.sleep(.5)
+
+                                self.temprange1 += 5
+                                self.temprange2 += 5
+                                count += 1
+                            elif count == self.watchlist_range:
+                                self.watchlisting = False
+                        while self.watchlisting == False:
+                            break
+                    elif user_message.lower() == "%equity":
+                        await message.channel.send(self.equity[-1])
+                        return
+                    elif user_message.lower() == "%profit loss":
+                        self.search_range = -6
+
+                        self.port_hist_pl_clean = self.port_hist_pl_clean[self.search_range:-1]
+                        self.equity_clean = self.equity_clean[self.search_range:-1]
+
+                        pl_dic = dict(zip(self.port_hist_pl_clean,self.equity_clean))
+                        pl_dic = pprint.pformat(pl_dic)
+                        await message.channel.send(pl_dic)
+                        return
+
+
+
+                    elif user_message.lower() == '%help':
+                        await message.channel.send('|Commands|')
+                        await message.channel.send(self.command_list)
+                        return
+                    else:
+                        await message.channel.send(
+                            f'You have not specified a command %help for a list of possible responses.')
+                        return
+
+    def token(self):
+        client.run(TOKEN)
+
+    def time(self):
+        while datetime.datetime.now().hour < self.trade_time:
+            print(f'Its not time to trade try again in until 3 MTN time.')
+            exit()
+        if datetime.datetime.now().hour >= self.trade_time:
+            Liam_Strategy()
+
+
+discordbot()
+
+
+
+
+
+
